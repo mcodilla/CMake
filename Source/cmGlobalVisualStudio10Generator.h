@@ -190,6 +190,7 @@ protected:
   cmGlobalVisualStudio10Generator(cmake* cm, std::string const& name);
 
   void Generate() override;
+  void ExportCompileCommands();
   virtual bool InitializeSystem(cmMakefile* mf);
   virtual bool InitializeWindows(cmMakefile* mf);
   virtual bool InitializeWindowsCE(cmMakefile* mf);

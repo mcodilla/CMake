@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <set>
 #include <sstream>
 #include <utility>
 
@@ -12,23 +13,31 @@
 #include <cmext/string_view>
 
 #include <cm3p/json/value.h>
+#include <cm3p/json/writer.h>
 
 #include "cmsys/FStream.hxx"
 #include "cmsys/Glob.hxx"
 #include "cmsys/RegularExpression.hxx"
 
 #include "cmCryptoHash.h"
+#include "cmGeneratedFileStream.h"
+#include "cmGeneratorExpression.h"
+#include "cmGeneratorFileSet.h"
 #include "cmGeneratorTarget.h"
 #include "cmGlobalGenerator.h"
 #include "cmGlobalVisualStudio7Generator.h"
 #include "cmGlobalVisualStudioGenerator.h"
 #include "cmIDEFlagTable.h"
 #include "cmJSONState.h"
+#include "cmList.h"
 #include "cmLocalGenerator.h"
 #include "cmLocalVisualStudio10Generator.h"
 #include "cmMakefile.h"
 #include "cmMessageType.h"
+#include "cmOutputConverter.h"
+#include "cmRulePlaceholderExpander.h"
 #include "cmSourceFile.h"
+#include "cmState.h"
 #include "cmStringAlgorithms.h"
 #include "cmSystemTools.h"
 #include "cmVersion.h"
@@ -692,6 +701,207 @@ void cmGlobalVisualStudio10Generator::Generate()
   if (cmValue cached = this->CMakeInstance->GetState()->GetCacheEntryValue(
         "CMAKE_VS_NUGET_PACKAGE_RESTORE")) {
     this->CMakeInstance->MarkCliAsUsed("CMAKE_VS_NUGET_PACKAGE_RESTORE");
+  }
+  if (!cmSystemTools::GetErrorOccurredFlag()) {
+    this->ExportCompileCommands();
+  }
+}
+
+static Json::Value MakeCompileCommand(cmGeneratorTarget* target,
+                                      cmSourceFile const* source,
+                                      std::string const& config)
+{
+  cmLocalGenerator* lg = target->GetLocalGenerator();
+  cmMakefile* mf = target->Makefile;
+  std::string const language = target->GetSourceFileLanguage(source, config);
+  cmGeneratorExpressionInterpreter genex(lg, config, target, language);
+  cmGeneratorFileSet const* fileSet =
+    target->GetFileSetForSource(config, source);
+  if (fileSet && fileSet->GetType() == cm::FileSetMetadata::CXX_MODULES) {
+    mf->IssueMessage(
+      MessageType::WARNING,
+      cmStrCat("Cannot export a compile command for \"", source->GetFullPath(),
+               "\" in target \"", target->GetName(), "\" (", config,
+               "): Visual Studio C++ module compilation is not supported."));
+    return Json::Value();
+  }
+
+  std::string flags;
+  lg->AppendFeatureOptions(flags, language, "EXPLICIT_LANGUAGE");
+  std::string targetFlags;
+  lg->GetTargetCompileFlags(target, config, language, targetFlags, "");
+  lg->AppendFlags(flags, targetFlags);
+  if (cmValue value = source->GetProperty("COMPILE_FLAGS")) {
+    lg->AppendFlags(flags, genex.Evaluate(*value, "COMPILE_FLAGS"));
+  }
+  if (cmValue value = source->GetProperty("COMPILE_OPTIONS")) {
+    lg->AppendCompileOptions(flags, genex.Evaluate(*value, "COMPILE_OPTIONS"));
+  }
+
+  std::set<std::string> defines;
+  lg->GetTargetDefines(target, config, language, defines);
+  defines.insert(cmStrCat("CMAKE_INTDIR=\"", config, '"'));
+  if (cmValue value = source->GetProperty("COMPILE_DEFINITIONS")) {
+    lg->AppendDefines(defines, genex.Evaluate(*value, "COMPILE_DEFINITIONS"));
+  }
+  if (cmValue value = source->GetProperty(
+        cmStrCat("COMPILE_DEFINITIONS_", cmSystemTools::UpperCase(config)))) {
+    lg->AppendDefines(defines, genex.Evaluate(*value, "COMPILE_DEFINITIONS"));
+  }
+
+  std::vector<std::string> includes;
+  if (fileSet) {
+    bool const own = fileSet->BelongsTo(target);
+    for (BT<std::string> const& option : own
+           ? fileSet->GetCompileOptions(config, language)
+           : fileSet->GetInterfaceCompileOptions(config, language)) {
+      lg->AppendCompileOptions(flags, option.Value);
+    }
+    for (BT<std::string> const& define : own
+           ? fileSet->GetCompileDefinitions(config, language)
+           : fileSet->GetInterfaceCompileDefinitions(config, language)) {
+      lg->AppendDefines(defines, define.Value);
+    }
+    for (BT<std::string> const& include : own
+           ? fileSet->GetIncludeDirectories(config, language)
+           : fileSet->GetInterfaceIncludeDirectories(config, language)) {
+      lg->AppendIncludeDirectories(includes, include.Value, *source);
+    }
+  }
+  if (cmValue value = source->GetProperty("INCLUDE_DIRECTORIES")) {
+    lg->AppendIncludeDirectories(
+      includes, genex.Evaluate(*value, "INCLUDE_DIRECTORIES"), *source);
+  }
+  std::vector<std::string> targetIncludes;
+  lg->GetIncludeDirectories(targetIncludes, target, language, config);
+  includes.insert(includes.end(), targetIncludes.begin(),
+                  targetIncludes.end());
+
+  std::string const pchSource = target->GetPchSource(config, language);
+  if (!pchSource.empty() &&
+      !source->GetPropertyAsBool("SKIP_PRECOMPILE_HEADERS") &&
+      !(fileSet && fileSet->GetProperty("SKIP_PRECOMPILE_HEADERS").IsOn())) {
+    std::string const pchOptions = source->GetFullPath() == pchSource
+      ? target->GetPchCreateCompileOptions(config, language)
+      : target->GetPchUseCompileOptions(config, language);
+    lg->AppendCompileOptions(flags,
+                             genex.Evaluate(pchOptions, "COMPILE_OPTIONS"));
+  }
+
+  std::string defineFlags;
+  lg->JoinDefines(defines, defineFlags, language);
+  std::string const includeFlags =
+    lg->GetIncludeFlags(includes, target, language, config);
+  std::string const escapedSource =
+    lg->ConvertToOutputFormat(source->GetFullPath(), cmOutputConverter::SHELL);
+  cmGeneratorTarget::SourceVariables const paths =
+    target->GetSourceVariables(source, config);
+  std::string const targetType = cmState::GetTargetTypeName(target->GetType());
+  cmRulePlaceholderExpander::RuleVariables vars;
+  vars.CMTargetName = target->GetName().c_str();
+  vars.CMTargetType = targetType.c_str();
+  vars.Language = language.c_str();
+  vars.Config = config.c_str();
+  vars.Source = escapedSource.c_str();
+  vars.Object = paths.ObjectFileDir.c_str();
+  vars.ObjectDir = paths.ObjectDir.c_str();
+  vars.ObjectFileDir = paths.ObjectFileDir.c_str();
+  vars.TargetSupportDir = paths.TargetSupportDir.c_str();
+  vars.TargetPDB = paths.TargetPDB.c_str();
+  vars.TargetCompilePDB = paths.TargetCompilePDB.c_str();
+  vars.Flags = flags.c_str();
+  vars.Defines = defineFlags.c_str();
+  vars.Includes = includeFlags.c_str();
+
+  cmList commands{ mf->GetRequiredDefinition(
+    cmStrCat("CMAKE_", language, "_COMPILE_OBJECT")) };
+  if (commands.size() != 1) {
+    mf->IssueMessage(
+      MessageType::WARNING,
+      cmStrCat("Cannot export a compile command for \"", source->GetFullPath(),
+               "\" in target \"", target->GetName(), "\" (", config,
+               "): the compile rule must contain exactly one command."));
+    return Json::Value();
+  }
+  std::string command = commands.front();
+  lg->CreateRulePlaceholderExpander()->ExpandRuleVariables(lg, command, vars);
+  std::vector<std::string> arguments;
+  cmSystemTools::ParseWindowsCommandLine(command.c_str(), arguments);
+  if (std::any_of(arguments.begin(), arguments.end(),
+                  [](std::string const& argument) {
+                    return argument.find("$(") != std::string::npos ||
+                      argument.find("%(") != std::string::npos;
+                  })) {
+    mf->IssueMessage(
+      MessageType::WARNING,
+      cmStrCat("Cannot export a compile command for \"", source->GetFullPath(),
+               "\" in target \"", target->GetName(), "\" (", config,
+               "): the command contains an unresolved MSBuild expression."));
+    return Json::Value();
+  }
+
+  Json::Value entry(Json::objectValue);
+  entry["directory"] = lg->GetCurrentBinaryDirectory();
+  entry["file"] = source->GetFullPath();
+  entry["command"] = command;
+  entry["output"] = cmStrCat(target->GetObjectDirectory(config),
+                             target->GetObjectName(source));
+  return entry;
+}
+
+void cmGlobalVisualStudio10Generator::ExportCompileCommands()
+{
+  Json::Value commands(Json::arrayValue);
+  for (std::unique_ptr<cmLocalGenerator> const& lg : this->LocalGenerators) {
+    if (lg->GetMakefile()->GetSafeDefinition("CMAKE_SYSTEM_NAME") !=
+        "Windows") {
+      continue;
+    }
+    for (std::unique_ptr<cmGeneratorTarget> const& target :
+         lg->GetGeneratorTargets()) {
+      if (!target->IsInBuildSystem() ||
+          !target->GetPropertyAsBool("EXPORT_COMPILE_COMMANDS") ||
+          target->GetProperty("EXTERNAL_MSPROJECT") ||
+          target->GetProperty("COMMON_LANGUAGE_RUNTIME")) {
+        continue;
+      }
+      for (std::string const& config : target->Makefile->GetGeneratorConfigs(
+             cmMakefile::ExcludeEmptyConfig)) {
+        std::vector<cmSourceFile const*> sources;
+        target->GetObjectSources(sources, config);
+        for (cmSourceFile const* source : sources) {
+          std::string const language =
+            target->GetSourceFileLanguage(source, config);
+          if (language != "C" && language != "CXX") {
+            continue;
+          }
+          std::string const compiler = target->Makefile->GetSafeDefinition(
+            cmStrCat("CMAKE_", language, "_COMPILER_ID"));
+          if (compiler != "MSVC" &&
+              !(compiler == "Clang" && this->IsClangClToolset())) {
+            continue;
+          }
+          Json::Value entry = MakeCompileCommand(target.get(), source, config);
+          if (!entry.isNull()) {
+            commands.append(std::move(entry));
+          }
+        }
+      }
+    }
+  }
+  if (commands.empty() || cmSystemTools::GetErrorOccurredFlag()) {
+    return;
+  }
+  std::string const path = cmStrCat(
+    this->CMakeInstance->GetHomeOutputDirectory(), "/compile_commands.json");
+  cmGeneratedFileStream stream(path);
+  if (!stream) {
+    return;
+  }
+  Json::StreamWriterBuilder builder;
+  std::unique_ptr<Json::StreamWriter> writer(builder.newStreamWriter());
+  if (writer->write(commands, &stream) != 0 || !stream || !stream.Close()) {
+    cmSystemTools::Error(cmStrCat("Failed to write ", path));
   }
 }
 

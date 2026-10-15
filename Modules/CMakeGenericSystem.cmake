@@ -71,7 +71,7 @@ if(CMAKE_GENERATOR MATCHES "Make")
   endif()
 endif()
 
-if(NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS AND CMAKE_GENERATOR MATCHES "Ninja|Unix Makefiles")
+if(NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS AND CMAKE_GENERATOR MATCHES "Ninja|Unix Makefiles|Visual Studio")
   set(CMAKE_EXPORT_COMPILE_COMMANDS "$ENV{CMAKE_EXPORT_COMPILE_COMMANDS}"
     CACHE BOOL "Enable/Disable output of compile commands during generation."
     )
