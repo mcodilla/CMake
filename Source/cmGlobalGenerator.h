@@ -218,6 +218,16 @@ public:
     return true;
   }
 
+  virtual bool PrepareBuild(cmBuildArgs const&,
+                            std::vector<std::string> const&,
+                            cmBuildOptions const&,
+                            std::vector<std::string> const&)
+  {
+    return true;
+  }
+
+  virtual int FinishBuild(cmBuildArgs const&, int result) { return result; }
+
   /**
    * Create LocalGenerators and process the CMakeLists files. This does not
    * actually produce any makefiles, DSPs, etc.

@@ -71,11 +71,17 @@ if(CMAKE_GENERATOR MATCHES "Make")
   endif()
 endif()
 
-if(NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS AND CMAKE_GENERATOR MATCHES "Ninja|Unix Makefiles")
+if(NOT DEFINED CMAKE_EXPORT_COMPILE_COMMANDS AND CMAKE_GENERATOR MATCHES "Ninja|Unix Makefiles|Visual Studio")
   set(CMAKE_EXPORT_COMPILE_COMMANDS "$ENV{CMAKE_EXPORT_COMPILE_COMMANDS}"
-    CACHE BOOL "Enable/Disable output of compile commands during generation."
+    CACHE BOOL "Enable/Disable export of compile commands."
     )
   mark_as_advanced(CMAKE_EXPORT_COMPILE_COMMANDS)
+endif()
+
+if(CMAKE_GENERATOR MATCHES "^Visual Studio " AND CMAKE_EXPORT_COMPILE_COMMANDS)
+  set(CMAKE_VS_MSBUILD_EXTRACTOR "" CACHE FILEPATH
+    "Path to msbuild-extractor-tool for exporting compile commands after a build.")
+  mark_as_advanced(CMAKE_VS_MSBUILD_EXTRACTOR)
 endif()
 
 if(NOT DEFINED CMAKE_EXPORT_BUILD_DATABASE AND CMAKE_GENERATOR MATCHES "Ninja")

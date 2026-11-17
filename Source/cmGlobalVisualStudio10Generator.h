@@ -42,6 +42,12 @@ public:
     std::vector<std::string> const& makeOptions = std::vector<std::string>(),
     BuildTryCompile isInTryCompile = BuildTryCompile::No) override;
 
+  bool PrepareBuild(cmBuildArgs const& buildArgs,
+                    std::vector<std::string> const& targets,
+                    cmBuildOptions const& buildOptions,
+                    std::vector<std::string> const& nativeOptions) override;
+  int FinishBuild(cmBuildArgs const& buildArgs, int result) override;
+
   //! create the correct local generator
   std::unique_ptr<cmLocalGenerator> CreateLocalGenerator(
     cmMakefile* mf) override;
@@ -275,6 +281,9 @@ private:
   LongestSourcePath LongestSource;
 
   std::string MSBuildCommand;
+  std::string CompileCommandsExtractor;
+  std::string CompileCommandsDirectory;
+  std::vector<std::string> CompileCommandsBinlogs;
   std::set<std::string> AndroidExecutableWarnings;
   virtual std::string FindMSBuildCommand();
   std::string GetVSMakeProgram() override { return this->GetMSBuildCommand(); }

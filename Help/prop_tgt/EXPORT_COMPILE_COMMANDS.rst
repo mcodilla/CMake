@@ -7,3 +7,7 @@ Enable/Disable output of compile commands during generation for a target.
 
 This property is initialized by the value of the variable
 :variable:`CMAKE_EXPORT_COMPILE_COMMANDS` if it is set when a target is created.
+
+This property controls generation-time export by Makefile and Ninja
+generators.  It does not filter the observed compilations exported by the
+Visual Studio build-time workflow.

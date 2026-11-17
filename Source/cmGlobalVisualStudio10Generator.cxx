@@ -17,6 +17,7 @@
 #include "cmsys/Glob.hxx"
 #include "cmsys/RegularExpression.hxx"
 
+#include "cmBuildArgs.h"
 #include "cmCryptoHash.h"
 #include "cmGeneratorTarget.h"
 #include "cmGlobalGenerator.h"
@@ -29,6 +30,7 @@
 #include "cmMakefile.h"
 #include "cmMessageType.h"
 #include "cmSourceFile.h"
+#include "cmState.h"
 #include "cmStringAlgorithms.h"
 #include "cmSystemTools.h"
 #include "cmVersion.h"
@@ -1071,13 +1073,128 @@ bool cmGlobalVisualStudio10Generator::FindVCTargetsPath(cmMakefile* mf)
   return true;
 }
 
+bool cmGlobalVisualStudio10Generator::PrepareBuild(
+  cmBuildArgs const& buildArgs, std::vector<std::string> const& targets,
+  cmBuildOptions const& buildOptions,
+  std::vector<std::string> const& nativeOptions)
+{
+  this->CompileCommandsDirectory.clear();
+  this->CompileCommandsBinlogs.clear();
+  cmState const* state = this->CMakeInstance->GetState();
+  if (!state->GetCacheEntryValue("CMAKE_EXPORT_COMPILE_COMMANDS").IsOn() ||
+      buildOptions.ResolveMode == PackageResolveMode::OnlyResolve ||
+      (!targets.empty() &&
+       std::all_of(
+         targets.begin(), targets.end(),
+         [](std::string const& target) { return target == "clean"; }))) {
+    return true;
+  }
+
+  // Resolve the actual build tool, including the Intel Fortran devenv
+  // fallback.
+  auto commands = this->GenerateBuildCommand(
+    "", buildArgs.projectName, buildArgs.binaryDir, targets, buildArgs.config,
+    buildArgs.jobs, buildArgs.verbose, buildOptions, nativeOptions);
+  for (auto const& command : commands) {
+    if (!command.PrimaryCommand.empty() &&
+        cmSystemTools::LowerCase(command.PrimaryCommand.front())
+            .find("devenv") != std::string::npos) {
+      cmSystemTools::Error("CMAKE_EXPORT_COMPILE_COMMANDS requires an MSBuild "
+                           "command-line build; "
+                           "exporting from devenv builds is not supported.");
+      return false;
+    }
+  }
+
+  cmValue configured = state->GetCacheEntryValue("CMAKE_VS_MSBUILD_EXTRACTOR");
+  std::string const program = configured && !configured->empty()
+    ? *configured
+    : "msbuild-extractor-tool";
+  this->CompileCommandsExtractor = cmSystemTools::FindProgram(
+    program,
+    { cmSystemTools::GetFilenamePath(cmSystemTools::GetCMakeCommand()) });
+  if (this->CompileCommandsExtractor.empty()) {
+    cmSystemTools::Error(
+      "CMAKE_EXPORT_COMPILE_COMMANDS requires msbuild-extractor-tool. "
+      "Make it available on PATH or set CMAKE_VS_MSBUILD_EXTRACTOR to its "
+      "path.");
+    return false;
+  }
+
+  std::string directory =
+    cmStrCat(cmSystemTools::CollapseFullPath(buildArgs.binaryDir),
+             "/CMakeFiles/CompileCommands/build-XXXXXX");
+  if (!cmSystemTools::MakeTempDirectory(directory)) {
+    cmSystemTools::Error(cmStrCat(
+      "Could not create compile commands capture directory: ", directory));
+    return false;
+  }
+  this->CompileCommandsDirectory = std::move(directory);
+  return true;
+}
+
+int cmGlobalVisualStudio10Generator::FinishBuild(cmBuildArgs const& buildArgs,
+                                                 int result)
+{
+  if (this->CompileCommandsDirectory.empty()) {
+    return result;
+  }
+
+  std::vector<std::string> command{ this->CompileCommandsExtractor };
+  bool missingLog = false;
+  for (auto const& binlog : this->CompileCommandsBinlogs) {
+    if (cmSystemTools::FileExists(binlog, true)) {
+      command.emplace_back("--binlog");
+      command.emplace_back(binlog);
+    } else if (result == 0) {
+      missingLog = true;
+    }
+  }
+  std::string const output =
+    cmStrCat(cmSystemTools::CollapseFullPath(buildArgs.binaryDir),
+             "/compile_commands.json");
+  bool exported = false;
+  if (!missingLog && command.size() > 1) {
+    command.insert(command.end(),
+                   { "--export-compile-commands", "--variant-policy", "first",
+                     "--allow-failed-build", "--output-file", output });
+    cmSystemTools::Message(cmStrCat("Exporting compile commands with ",
+                                    this->CompileCommandsExtractor));
+    int extractorResult = 1;
+    // A private working directory also prevents an unrelated extractor config
+    // in the build tree from changing this invocation.
+    bool const ran = cmSystemTools::RunSingleCommand(
+      command, nullptr, nullptr, &extractorResult,
+      this->CompileCommandsDirectory.c_str(),
+      cmSystemTools::OUTPUT_PASSTHROUGH);
+    exported = ran &&
+      (((extractorResult == 0 || extractorResult == 2) &&
+        cmSystemTools::FileExists(output, true)) ||
+       extractorResult == 3);
+    if (ran && extractorResult == 3) {
+      cmSystemTools::Message(
+        "No new compiler commands; compile_commands.json was not changed.");
+    }
+  }
+  if (!exported) {
+    cmSystemTools::Error(
+      cmStrCat("Could not export compile commands. Capture files are in ",
+               this->CompileCommandsDirectory));
+  } else if (result == 0) {
+    cmSystemTools::RemoveADirectory(this->CompileCommandsDirectory);
+  }
+  this->CompileCommandsDirectory.clear();
+  this->CompileCommandsBinlogs.clear();
+  return result != 0 ? result : (exported ? 0 : 1);
+}
+
 std::vector<cmGlobalGenerator::GeneratedMakeCommand>
 cmGlobalVisualStudio10Generator::GenerateBuildCommand(
   std::string const& makeProgram, std::string const& projectName,
   std::string const& projectDir, std::vector<std::string> const& targetNames,
   std::string const& config, int jobs, bool verbose,
   cmBuildOptions buildOptions, std::vector<std::string> const& makeOptions,
-  BuildTryCompile /*isInTryCompile*/)
+  BuildTryCompile isInTryCompile)
 {
   std::vector<GeneratedMakeCommand> makeCommands;
   // Select the caller- or user-preferred make program, else MSBuild.
@@ -1242,6 +1359,17 @@ cmGlobalVisualStudio10Generator::GenerateBuildCommand(
     makeCommand.Add(cmStrCat("/v:", ((verbose) ? 'n' : 'm')));
     makeCommand.Add(makeOptions.begin(), makeOptions.end());
     makeCommands.emplace_back(std::move(makeCommand));
+  }
+  if (!this->CompileCommandsDirectory.empty() &&
+      isInTryCompile == BuildTryCompile::No) {
+    for (auto& command : makeCommands) {
+      std::string binlog =
+        cmStrCat(this->CompileCommandsDirectory, "/build-",
+                 this->CompileCommandsBinlogs.size(), ".binlog");
+      command.Add(
+        cmStrCat("/bl:LogFile=\"", binlog, "\";ProjectImports=None"));
+      this->CompileCommandsBinlogs.emplace_back(std::move(binlog));
+    }
   }
   return makeCommands;
 }

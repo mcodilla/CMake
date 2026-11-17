@@ -4293,6 +4293,11 @@ int cmake::Build(cmBuildArgs buildArgs, std::vector<std::string> targets,
     return 1;
   }
 
+  if (!this->GlobalGenerator->PrepareBuild(buildArgs, targets, buildOptions,
+                                           nativeOptions)) {
+    return 1;
+  }
+
 #if !defined(CMAKE_BOOTSTRAP)
   cmInstrumentation instrumentation(buildArgs.binaryDir);
   if (instrumentation.HasErrors()) {
@@ -4343,10 +4348,14 @@ int cmake::Build(cmBuildArgs buildArgs, std::vector<std::string> targets,
     }
     return buildresult;
   }
-  instrumentation.CollectTimingData(
-    cmInstrumentationQuery::Hook::PostCMakeBuild);
 #else
   int buildresult = doBuild();
+#endif
+
+  buildresult = this->GlobalGenerator->FinishBuild(buildArgs, buildresult);
+#if !defined(CMAKE_BOOTSTRAP)
+  instrumentation.CollectTimingData(
+    cmInstrumentationQuery::Hook::PostCMakeBuild);
 #endif
 
   return buildresult;

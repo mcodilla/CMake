@@ -829,6 +829,11 @@ project binary tree:
 This abstracts a native build tool's command-line interface with the
 following options:
 
+With :ref:`Visual Studio Generators`, enabling
+:variable:`CMAKE_EXPORT_COMPILE_COMMANDS` in the cache also enables an external
+binlog-based export after the native build.  See that variable for tool
+requirements and the scope of the resulting compilation database.
+
 .. option:: --build <dir>
 
   Project binary directory to be built.  This is required (unless a preset

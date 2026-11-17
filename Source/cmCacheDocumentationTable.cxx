@@ -266,7 +266,7 @@ Entry const kEntries[] = {
   { "CMAKE_EXPORT_BUILD_DATABASE"_s,
     "Experimental; gated by CMAKE_EXPERIMENTAL_EXPORT_BUILD_DATABASE. Enables build_database.json with C++ module compile commands."_s },
   { "CMAKE_EXPORT_COMPILE_COMMANDS"_s,
-    "Enable output of a compile_commands.json file listing the exact compiler invocation for each translation unit. Implemented by the Makefile and Ninja generators; ignored elsewhere."_s },
+    "Enable export of compile_commands.json. Makefile and Ninja generators write it during generation; Visual Studio generators invoke msbuild-extractor after cmake --build."_s },
   { "CMAKE_EXPORT_NO_PACKAGE_REGISTRY"_s,
     "Disable the export(PACKAGE) command from writing to the user package registry when CMP0090 is not set to NEW."_s },
   { "CMAKE_EXPORT_PACKAGE_REGISTRY"_s,
